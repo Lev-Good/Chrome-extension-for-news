@@ -1,118 +1,205 @@
+// שם הקובץ: server.js
+
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
+const Parser = require('rss-parser');
+const cheerio = require('cheerio'); 
 
-// תיקון 1: הוספת תמיכה ב-Fetch (בשביל גרסאות Node ישנות ב-Render)
-const fetch = (...args) =>
-  import('node-fetch').then(({default: fetch}) => fetch(...args));
+// ספריות טלגרם החדשות
+const { Api, TelegramClient } = require('telegram');
+const { StringSession } = require('telegram/sessions');
+const { NewMessage } = require('telegram/events');
 
 const app = express();
 app.use(cors());
 
-let cachedMessages = [];
+const parser = new Parser({ timeout: 8000 });
 
-// רשימת הערוצים שלך
-const channels = [
-    { name: "JDN (אתר)", url: "https://www.jdn.co.il/feed/", type: "rss" },
-    { name: "ערוץ 7 (אתר)", url: "https://www.inn.co.il/Rss.aspx?Category=1", type: "rss" },
-    { name: "ערוץ 14 (אתר)", url: "https://www.now14.co.il/feed/", type: "rss" },
-    { name: "סרוגים (אתר)", url: "https://www.srugim.co.il/feed", type: "rss" },
-    { name: "המחדש (אתר)", url: "https://hm-news.co.il/feed/", type: "rss" },
-    { name: "בחדרי חרדים (אתר)", url: "https://www.bhol.co.il/rss.xml", type: "rss" },
-    { name: "Ynet מבזקים", url: "https://t.me/s/ynetalert", type: "telegram" },
-    { name: "Ynet חדר חדשות", url: "https://t.me/s/ynetnewsroom", type: "telegram" },
-    { name: "N12 מתפרצות", url: "https://t.me/s/N12breaking", type: "telegram" },
-    { name: "N12 הצ'אט", url: "https://t.me/s/N12updates", type: "telegram" },
-    { name: "חדשות 13", url: "https://t.me/s/news13channel", type: "telegram" },
-    { name: "וואלה! חדשות", url: "https://t.me/s/walla_news", type: "telegram" },
-    { name: "כאן חדשות", url: "https://t.me/s/kan_news", type: "telegram" },
-    { name: "ישראל היום", url: "https://t.me/s/israelhayom", type: "telegram" },
-    { name: "מעריב", url: "https://t.me/s/maarivonline", type: "telegram" },
-    { name: "גלובס", url: "https://t.me/s/globesnews", type: "telegram" },
-    { name: "עכשיו 14", url: "https://t.me/s/now14updates", type: "telegram" },
-    { name: "כיכר השבת", url: "https://t.me/s/kikar_news", type: "telegram" },
-    { name: "דובר צהל", url: "https://t.me/s/idfonline", type: "telegram" },
-    { name: "פיקוד העורף", url: "https://t.me/s/pikudhaoref", type: "telegram" },
-    { name: "עמית סגל", url: "https://t.me/s/amitsegal", type: "telegram" },
-    { name: "ינון מגל", url: "https://t.me/s/yinonmagal", type: "telegram" },
-    { name: "יאיר שרקי", url: "https://t.me/s/yaircherki", type: "telegram" },
-    { name: "ברק רביד", url: "https://t.me/s/barak_ravid", type: "telegram" },
-    { name: "ניר דבורי", url: "https://t.me/s/nir_dvori", type: "telegram" },
-    { name: "אלמוג בוקר", url: "https://t.me/s/almog_boker", type: "telegram" },
-    { name: "סיון רהב מאיר", url: "https://t.me/s/sivanrahav", type: "telegram" },
-    { name: "301 העולם הערבי", url: "https://t.me/s/arabworld301", type: "telegram" },
-    { name: "אבו עלי אקספרס", url: "https://t.me/s/abualiexpress", type: "telegram" },
-    { name: "זירת החדשות", url: "https://t.me/s/ziratnews", type: "telegram" },
-    { name: "מבזקי בטחון 24/7", url: "https://t.me/s/mivzakey_bitahon", type: "telegram" },
-    { name: "זק״א", url: "https://t.me/s/ZAKA_il", type: "telegram" },
-    { name: "איחוד הצלה", url: "https://t.me/s/UnitedHatzalahIL", type: "telegram" },
-    { name: "מגן דוד אדום", url: "https://t.me/s/mdaisrael", type: "telegram" },
-    { name: "הלכה יומית", url: "https://t.me/s/halacha_yomit", type: "telegram" }
+let newsList = []; 
+let clients = []; 
+const MAX_NEWS = 1000; 
+
+// --- הגדרות טלגרם של החשבון שלך ---
+const apiId = parseInt(process.env.TELEGRAM_API_ID) || 31830285; // ה-API ID שלך
+const apiHash = process.env.TELEGRAM_API_HASH || "04f8ab5c37f4048bdadffa771c5a4ce4"; // ה-API HASH שלך
+const sessionString = process.env.TELEGRAM_SESSION || process.env.SESSION_STRING || "הכנס_כאן_את_המחרוזת_הארוכה_שקיבלת_מהסקריפט_login"; // המחרוזת מסקריפט ההתחברות או ממשתנה סביבה
+
+// רשימת ערוצי ה-RSS בלבד (את הטלגרם השרת שואב אוטומטית ממה שאתה מנוי אליו!)
+const rssChannels = [
+    { name: "JDN (אתר)", url: "https://www.jdn.co.il/feed/" },
+    { name: "ערוץ 7 (אתר)", url: "https://www.inn.co.il/Rss.aspx?Category=1" },
+    { name: "סרוגים (אתר)", url: "https://www.srugim.co.il/feed" },
+    { name: "המחדש (אתר)", url: "https://hm-news.co.il/feed/" },
+    { name: "בחדרי חרדים (אתר)", url: "https://www.bhol.co.il/rss.xml" },
+    { name: "ערוץ 14 (אתר)", url: "https://www.now14.co.il/feed/" }
 ];
 
-function decodeHtml(html) {
-    if (!html) return "";
-    return html.replace(/<br\s*\/?>/gi, ' | ').replace(/<[^>]*>?/gm, '')
-        .replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;/g, "'")
-        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
-        .replace(/&#8211;/g, '-').trim();
+// ==========================================
+// חלק 1: API וצינור SSE 
+// ==========================================
+
+app.get('/', (req, res) => {
+    res.json(newsList);
+});
+
+app.get('/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders(); 
+
+    const clientId = Date.now();
+    clients.push({ id: clientId, res });
+
+    res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+
+    req.on('close', () => {
+        clients = clients.filter(client => client.id !== clientId);
+    });
+});
+
+setInterval(() => {
+    clients.forEach(c => c.res.write(':\n\n'));
+}, 25000);
+
+function generateHash(text) {
+    return crypto.createHash('md5').update(text).digest('hex');
 }
 
-async function fetchSingleChannel(channel) {
-    try {
-        // תיקון 2: בדיקה שהכתובת לא ריקה לפני הניסיון לגשת אליה
-        if (!channel.url || !channel.url.trim()) return [];
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
-        
-        const response = await fetch(channel.url, {
-            signal: controller.signal,
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36' }
-        });
-        clearTimeout(timeoutId);
-        if (!response.ok) return [];
-        const text = await response.text();
-        let results = [];
-        if (channel.type === "telegram") {
-            const blocks = text.split('tgme_widget_message_wrap').slice(1);
-            blocks.forEach(block => {
-                const txt = block.match(/<div class="tgme_widget_message_text[^>]*>([\s\S]*?)<\/div>/i);
-                const img = block.match(/background-image:url\('([^']+)'\)/i);
-                if (txt && txt[1].length > 10) results.push({ text: decodeHtml(txt[1]), image: img ? img[1] : null, source: channel.name });
-            });
-            return results.slice(-3);
-        } else {
-            const items = text.match(/<item>([\s\S]*?)<\/item>/gi) || [];
-            items.slice(0, 3).forEach(item => {
-                const t = item.match(/<title>(.*?)<\/title>/i);
-                const img = item.match(/<enclosure[^>]*url="([^"]+)"/i) || item.match(/<media:content[^>]*url="([^"]+)"/i) || item.match(/<img[^>]*src="([^"]+)"/i);
-                if (t) results.push({ text: decodeHtml(t[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1')), source: channel.name, image: img ? img[1] : null });
-            });
-            return results;
-        }
-    } catch (e) { return []; }
+function broadcast(newsItem) {
+    clients.forEach(client => {
+        client.res.write(`data: ${JSON.stringify({ type: 'news', data: newsItem })}\n\n`);
+    });
 }
 
-async function fetchNews() {
-    console.log("Starting update cycle...");
-    let all = [];
-    const chunkSize = 10;
-    for (let i = 0; i < channels.length; i += chunkSize) {
-        const chunk = channels.slice(i, i + chunkSize);
-        const results = await Promise.all(chunk.map(c => fetchSingleChannel(c)));
-        results.forEach(r => all.push(...r));
-        await new Promise(res => setTimeout(res, 500));
+// ==========================================
+// חלק 2: חיבור לטלגרם בזמן אמת (Push)
+// ==========================================
+
+async function startTelegramClient() {
+    if (!sessionString || sessionString.includes("הכנס_כאן") || sessionString.includes("1BAAOMTQ5LjE1NC4xNjcuOTEAUF2QhH4Ujtdpco0M2nKIcxmp0x9Bp8euotts79UwIhgMVe9xcZxLzPKkv38pR1w5EWDJis5OwD+HZfrbxnSwJNIIIUGQQY2x4OO/Mpb/a9tHQarNgsoJ3BDYBYYujOmtYeVLM+n1Z9LK/VII4fCJOgp1r5GuY7X+/y9s5kr06FvLM4V6KmSRsXjqgIu4qizkz2a6OCC16pXJgoAPg/zFt25xYgUPFHwgqGRuWNvx8pGmwptDgjJ38MVcYuO9bhjTn1JX8WRh4y+V1ZV4f07yaDbk+Sg7BGE44+GL7frx/S9andA2LSlodm2Q4cJAbz7H2MDYo0q5d3nfNPyr7KmMHMc=")) {
+        console.log("דילוג על התחברות לטלגרם - לא הוזנה מחרוזת Session");
+        return;
     }
-    if (all.length > 0) cachedMessages = all;
-    console.log("Update finished. Messages count:", cachedMessages.length);
-    setTimeout(fetchNews, 60000);
+
+    const stringSession = new StringSession(sessionString);
+    const client = new TelegramClient(stringSession, apiId, apiHash, {
+        connectionRetries: 5,
+    });
+
+    try {
+        await client.connect();
+        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת!");
+
+        // מאזין לכל הודעה חדשה שמגיעה לחשבון
+        client.addEventHandler(async (event) => {
+            const message = event.message;
+            
+            // מתעלם מהודעות פרטיות או קבוצות צ'אט, לוקח רק מערוצי שידור
+            if (event.isPrivate) return;
+            const chat = await event.getChat();
+            if (!chat || !chat.broadcast) return; 
+
+            const channelName = chat.title || "ערוץ טלגרם";
+            let cleanText = message.message || "";
+            if (!cleanText.trim()) return; // התעלמות מהודעות שהן רק תמונה ללא טקסט
+
+            // חלוקה לכותרת ותוכן
+            let lines = cleanText.split('\n').filter(l => l.trim().length > 0);
+            let title = lines.length > 0 ? lines[0] : '';
+            let content = lines.length > 1 ? lines.slice(1).join('\n') : '';
+
+            if (title.length > 80) {
+                content = title.substring(80) + (content ? '\n' + content : '');
+                title = title.substring(0, 80) + '...';
+            }
+
+            const newsItem = {
+                hash: generateHash(cleanText + channelName + message.id),
+                title: title,
+                content: content,
+                link: `https://t.me/c/${chat.id}/${message.id}`,
+                source: channelName,
+                imageUrl: null, 
+                time: new Date(message.date * 1000).toISOString()
+            };
+
+            newsList.unshift(newsItem);
+            if (newsList.length > MAX_NEWS) newsList.pop();
+            
+            broadcast(newsItem); 
+
+        }, new NewMessage({}));
+
+    } catch (error) {
+        console.error("שגיאה בחיבור לטלגרם:", error);
+    }
 }
 
-app.get('/', (req, res) => res.json(cachedMessages));
-app.get('/ping', (req, res) => res.send('pong'));
+// ==========================================
+// חלק 3: סריקת אתרי RSS (Polling)
+// ==========================================
 
-// תיקון 3: הפעלת הסריקה רק אחרי שהשרת עלה לאוויר
-app.listen(process.env.PORT || 3000, () => {
-    console.log("Server running");
-    fetchNews();
+async function fetchRSSData(channel) {
+    try {
+        const feed = await parser.parseURL(channel.url);
+        let itemsToProcess = feed.items.map(item => {
+            const rawContent = item.content || item.contentSnippet || '';
+            let cleanText = cheerio.load(rawContent).text().replace(/<[^>]+>/g, '').trim();
+
+            let imageUrl = item.enclosure ? item.enclosure.url : null;
+            if (!imageUrl) {
+                const imgMatch = rawContent.match(/<img[^>]+src="([^">]+)"/i);
+                if (imgMatch) imageUrl = imgMatch[1];
+            }
+            
+            return {
+                title: item.title,
+                content: cleanText, 
+                link: item.link,
+                source: channel.name,
+                imageUrl: imageUrl,
+                time: item.isoDate || new Date().toISOString()
+            };
+        });
+
+        itemsToProcess.reverse().forEach(item => { 
+            const hash = generateHash(item.title + item.content);
+            const exists = newsList.find(n => n.hash === hash);
+            const isTooOld = new Date(item.time).getTime() < (Date.now() - 48 * 60 * 60 * 1000);
+
+            if (!exists && !isTooOld) {
+                const newsItem = { hash, title: item.title, content: item.content, link: item.link, source: item.source, imageUrl: item.imageUrl, time: item.time };
+                newsList.unshift(newsItem);
+                if (newsList.length > MAX_NEWS) newsList.pop();
+                broadcast(newsItem);
+            }
+        });
+        newsList.sort((a, b) => new Date(b.time) - new Date(a.time));
+
+    } catch (error) {
+        console.error(`שגיאה בסריקת RSS מ- ${channel.name}:`, error.message);
+    }
+}
+
+async function fetchAllRSS() {
+    for (let i = 0; i < rssChannels.length; i++) {
+        await fetchRSSData(rssChannels[i]);
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+}
+
+// הפעלת סריקת RSS כל דקה
+setInterval(fetchAllRSS, 60 * 1000);
+fetchAllRSS();
+
+// הפעלת מאזין הטלגרם
+startTelegramClient();
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`השרת פועל בהצלחה על פורט ${PORT}`);
 });
