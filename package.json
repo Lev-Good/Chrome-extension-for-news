@@ -1,14 +1,18 @@
 {
-  "name": "news-server",
+  "name": "news-sse-server",
   "version": "1.0.0",
-  "description": "News Aggregator Server",
+  "description": "שרת למשיכת חדשות ושידורן ב-SSE לתוסף כרום",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "login": "node login.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
-    "node-fetch": "^3.3.1"
+    "express": "^4.18.2",
+    "rss-parser": "^3.13.0",
+    "telegram": "^2.22.2",
+    "input": "^1.0.1"
   }
 }
