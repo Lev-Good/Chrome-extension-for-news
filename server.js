@@ -102,18 +102,35 @@ async function startTelegramClient() {
         // מאזין לכל הודעה חדשה שמגיעה לחשבון
 client.addEventHandler(async (event) => {
             const message = event.message;
-            if (event.isPrivate || !message) return;
             
-            const chat = await event.getChat();
+            // מתעלם מהודעות פרטיות או הודעות חסרות טקסט
+            if (event.isPrivate || !message || !message.message) return;
             
-            // הדפסה מפורטת שכוללת גם את תוכן ההודעה
-            console.log(">>> [טלגרם] תוכן ההודעה:", message.message ? message.message.substring(0, 50) : "ללא טקסט");
-            console.log(">>> [טלגרם] מזהה:", event.chatId, "| שם שזוהה:", chat?.title, "| סוג:", chat?.className);
+            let chat;
+            try {
+                // ניסיון ראשון: משיכה מהירה מהזיכרון
+                chat = await event.getChat();
+                
+                // ניסיון שני: אם הזיכרון ריק, נשלוף את הנתונים בכוח משרתי טלגרם לפי ה-ID!
+                if (!chat || !chat.title) {
+                    chat = await client.getEntity(event.chatId);
+                }
+            } catch (e) {
+                console.log(">>> [שגיאה] לא הצלחתי לזהות פרטי צ'אט עבור מזהה:", event.chatId?.toString());
+            }
+            
+            const channelName = chat?.title || "ערוץ לא ידוע";
+            const isBroadcast = chat?.broadcast === true;
+            
+            console.log(">>> [טלגרם] תוכן:", message.message.substring(0, 50));
+            console.log(">>> [טלגרם] מזהה:", event.chatId?.toString(), "| שם שזוהה:", channelName, "| האם ערוץ שידור:", isBroadcast);
 
-            if (!chat || !chat.broadcast) return;
+            // אם זה לא ערוץ ציבורי (למשל קבוצה), או שהזיהוי נכשל לחלוטין - נזרוק את ההודעה בשרת
+            if (!chat || !isBroadcast) {
+                 console.log(">>> [סינון] ההודעה נזרקה בשרת! (היא אינה ערוץ שידור או שיש שגיאת זיהוי)");
+                 return; 
+            }
 
-            const channelName = chat.title || "ערוץ טלגרם";
-            console.log(">>> [טלגרם] התקבלה הודעה! ערוץ:", channelName, "| טקסט:", cleanText.substring(0, 40));
             let cleanText = message.message || "";
             if (!cleanText.trim()) return; // התעלמות מהודעות שהן רק תמונה ללא טקסט
 
