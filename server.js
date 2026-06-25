@@ -107,6 +107,7 @@ async function startTelegramClient() {
             if (!chat || !chat.broadcast) return; 
 
             const channelName = chat.title || "ערוץ טלגרם";
+            console.log(">>> [טלגרם] התקבלה הודעה! ערוץ:", channelName, "| טקסט:", cleanText.substring(0, 40));
             let cleanText = message.message || "";
             if (!cleanText.trim()) return; // התעלמות מהודעות שהן רק תמונה ללא טקסט
 
