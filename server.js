@@ -84,7 +84,7 @@ function broadcast(newsItem) {
 // ==========================================
 
 async function startTelegramClient() {
-    if (!sessionString || sessionString.includes("הכנס_כאן") || sessionString.includes("1BAAOMTQ5LjE1NC4xNjcuOTEAUF2QhH4Ujtdpco0M2nKIcxmp0x9Bp8euotts79UwIhgMVe9xcZxLzPKkv38pR1w5EWDJis5OwD+HZfrbxnSwJNIIIUGQQY2x4OO/Mpb/a9tHQarNgsoJ3BDYBYYujOmtYeVLM+n1Z9LK/VII4fCJOgp1r5GuY7X+/y9s5kr06FvLM4V6KmSRsXjqgIu4qizkz2a6OCC16pXJgoAPg/zFt25xYgUPFHwgqGRuWNvx8pGmwptDgjJ38MVcYuO9bhjTn1JX8WRh4y+V1ZV4f07yaDbk+Sg7BGE44+GL7frx/S9andA2LSlodm2Q4cJAbz7H2MDYo0q5d3nfNPyr7KmMHMc=")) {
+    if (!sessionString || sessionString.includes("הכנס_כאן")) {
         console.log("דילוג על התחברות לטלגרם - לא הוזנה מחרוזת Session");
         return;
     }
@@ -98,50 +98,59 @@ async function startTelegramClient() {
         await client.connect();
         console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת!");
         
-        // טעינת רשימת הערוצים לזיכרון כדי שהשרת יכיר את השמות שלהם!
-        await client.getDialogs({});
+        // פתרון מלכודת הזיכרון: טעינה עמוקה של 500 צ'אטים כדי להבטיח קבלת פוש מכל ערוץ
+        await client.getDialogs({ limit: 500 });
 
         client.addEventHandler(async (event) => {
+            console.log("==================================================");
+            console.log(">>> [טלגרם - גלאי גולמי] התעוררתי! מזהה צ'אט:", event.chatId?.toString());
+            
             const message = event.message;
-            
-            // מתעלם מהודעות פרטיות או הודעות חסרות טקסט
-            if (event.isPrivate || !message || !message.message) return;
-            
+            if (!message) {
+                console.log(">>> [סינון] אין אובייקט הודעה, מדלג.");
+                return;
+            }
+
+            if (event.isPrivate) {
+                console.log(">>> [סינון] זוהתה הודעה פרטית (DM), מדלג.");
+                return;
+            }
+
             let chat;
             try {
-                // ניסיון ראשון: משיכה מהירה מהזיכרון
                 chat = await event.getChat();
-                
-                // ניסיון שני: אם הזיכרון ריק, נשלוף את הנתונים בכוח משרתי טלגרם לפי ה-ID!
                 if (!chat || !chat.title) {
                     chat = await client.getEntity(event.chatId);
                 }
             } catch (e) {
-                console.log(">>> [שגיאה] לא הצלחתי לזהות פרטי צ'אט עבור מזהה:", event.chatId?.toString());
+                console.log(">>> [שגיאה] השרת לא הצליח לזהות מי הערוץ. מזהה:", event.chatId?.toString());
             }
-            
+
             const channelName = chat?.title || "ערוץ לא ידוע";
-            
-            console.log(">>> [טלגרם] תוכן:", message.message.substring(0, 50));
-            console.log(">>> [טלגרם] מזהה:", event.chatId?.toString(), "| שם שזוהה:", channelName);
+            console.log(">>> [טלגרם] שם הערוץ:", channelName);
 
-            // אם לא הצלחנו למצוא את שם הערוץ - נזרוק את ההודעה
-            if (!chat || !chat.title) {
-                 console.log(">>> [סינון] ההודעה נזרקה בשרת! (לא זוהה שם צ'אט)");
-                 return; 
+            // פתרון מלכודת הכיתוב: חילוץ טקסט חכם - תופס גם טקסט רגיל וגם כיתוב של תמונה/וידאו!
+            let rawText = message.text || message.message || "";
+            console.log(">>> [טלגרם] תוכן מקורי:", rawText.substring(0, 70).replace(/\n/g, ' '));
+
+            if (!rawText.trim()) {
+                console.log(">>> [סינון] הודעה ללא טקסט (כנראה סטיקר או תמונה בלבד ללא כיתוב), מדלג.");
+                return;
             }
 
-            let cleanText = message.message || "";
+            if (channelName === "ערוץ לא ידוע") {
+                console.log(">>> [סינון] נזרק כי השם לא זוהה בוודאות.");
+                return;
+            }
 
-            // --- מנגנון ניקוי טקסט אוטומטי (מנקה פרסומות, קישורים וזבל) ---
+            // --- מנגנון ניקוי טקסט אוטומטי ---
             const stopWords = ["להמשך קריאה", "להצטרפות", "לכל העדכונים", "כנסו", "לפרטים נוספים", "t.me", "chat.whatsapp.com", "לקבוצת הוואטסאפ", "לערוץ הטלגרם"];
-            let lines = cleanText.split('\n');
+            let lines = rawText.split('\n');
             let filteredLines = [];
             
             for (let line of lines) {
-                // בדיקה האם השורה מכילה מילת עצירה
                 if (stopWords.some(word => line.includes(word))) {
-                    break; // עוצר את קריאת ההודעה לחלוטין ברגע שמגיע החלק הפרסומי
+                    break; 
                 }
                 if (line.trim().length > 0) {
                     filteredLines.push(line);
@@ -151,20 +160,21 @@ async function startTelegramClient() {
             let title = filteredLines.length > 0 ? filteredLines[0] : '';
             let content = filteredLines.length > 1 ? filteredLines.slice(1).join('\n') : '';
 
-            // חיתוך כותרת ארוכה מדי
             if (title.length > 80) {
                 content = title.substring(80) + (content ? '\n' + content : '');
                 title = title.substring(0, 80) + '...';
             }
             
-            // מניעת שידור הודעות ריקות לגמרי לאחר הניקוי
-            if (!title && !content) return;
+            if (!title && !content) {
+                console.log(">>> [סינון] ההודעה התרוקנה לגמרי אחרי הניקוי, מדלג.");
+                return;
+            }
 
             const newsItem = {
-                hash: generateHash(cleanText + channelName + message.id),
+                hash: generateHash(rawText + channelName + message.id),
                 title: title,
                 content: content,
-                link: `https://t.me/c/${chat.id}/${message.id}`,
+                link: `https://t.me/c/${event.chatId?.toString().replace('-100', '')}/${message.id}`,
                 source: channelName,
                 imageUrl: null, 
                 time: new Date(message.date * 1000).toISOString()
@@ -173,6 +183,7 @@ async function startTelegramClient() {
             newsList.unshift(newsItem);
             if (newsList.length > MAX_NEWS) newsList.pop();
             
+            console.log(`>>> [הצלחה!] ההודעה מערוץ '${channelName}' משודרת כעת לתוסף בדפדפן.`);
             broadcast(newsItem); 
 
         }, new NewMessage({}));
