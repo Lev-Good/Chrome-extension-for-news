@@ -100,10 +100,13 @@ async function startTelegramClient() {
         // מאזין לכל הודעה חדשה שמגיעה לחשבון
         client.addEventHandler(async (event) => {
             const message = event.message;
-            
-            // מתעלם מהודעות פרטיות או קבוצות צ'אט, לוקח רק מערוצי שידור
             if (event.isPrivate) return;
+            
             const chat = await event.getChat();
+            
+            // הדפסה חכמה שתתפוס כל דבר שאינו הודעה פרטית!
+            console.log(">>> [טלגרם סורק] התקבלה תנועה מצ'אט בשם:", chat?.title, "| סוג:", chat?.className);
+
             if (!chat || !chat.broadcast) return; 
 
             const channelName = chat.title || "ערוץ טלגרם";
