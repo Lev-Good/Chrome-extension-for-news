@@ -96,25 +96,14 @@ async function startTelegramClient() {
 
     try {
         await client.connect();
-        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת!");
+        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת! (מצב צינור פתוח)");
         
-        // פתרון מלכודת הזיכרון: טעינה עמוקה של 500 צ'אטים כדי להבטיח קבלת פוש מכל ערוץ
+        // טעינת עומק כדי לזהות כמה שיותר שמות של אנשים וקבוצות
         await client.getDialogs({ limit: 500 });
 
         client.addEventHandler(async (event) => {
-            console.log("==================================================");
-            console.log(">>> [טלגרם - גלאי גולמי] התעוררתי! מזהה צ'אט:", event.chatId?.toString());
-            
             const message = event.message;
-            if (!message) {
-                console.log(">>> [סינון] אין אובייקט הודעה, מדלג.");
-                return;
-            }
-
-            if (event.isPrivate) {
-                console.log(">>> [סינון] זוהתה הודעה פרטית (DM), מדלג.");
-                return;
-            }
+            if (!message) return;
 
             let chat;
             try {
@@ -123,67 +112,35 @@ async function startTelegramClient() {
                     chat = await client.getEntity(event.chatId);
                 }
             } catch (e) {
-                console.log(">>> [שגיאה] השרת לא הצליח לזהות מי הערוץ. מזהה:", event.chatId?.toString());
+                console.log(">>> [שגיאה] זיהוי ערוץ נכשל:", event.chatId?.toString());
             }
 
-            const channelName = chat?.title || "ערוץ לא ידוע";
-            console.log(">>> [טלגרם] שם הערוץ:", channelName);
-
-            // פתרון מלכודת הכיתוב: חילוץ טקסט חכם - תופס גם טקסט רגיל וגם כיתוב של תמונה/וידאו!
+            // לוקח את השם בכל מחיר: שם ערוץ, שם של קבוצה, או שם פרטי של איש קשר
+            const sourceName = chat?.title || chat?.firstName || chat?.username || "מקור לא ידוע";
+            
+            // שולף טקסט, או שם הודעה חלופית אם זו תמונה/סטיקר ללא טקסט
             let rawText = message.text || message.message || "";
-            console.log(">>> [טלגרם] תוכן מקורי:", rawText.substring(0, 70).replace(/\n/g, ' '));
-
             if (!rawText.trim()) {
-                console.log(">>> [סינון] הודעה ללא טקסט (כנראה סטיקר או תמונה בלבד ללא כיתוב), מדלג.");
-                return;
+                rawText = "[הודעה ללא טקסט - תמונה/וידאו/סטיקר]";
             }
 
-            if (channelName === "ערוץ לא ידוע") {
-                console.log(">>> [סינון] נזרק כי השם לא זוהה בוודאות.");
-                return;
-            }
+            console.log(">>> [טלגרם פתוח] התקבל מ:", sourceName, "| טקסט:", rawText.substring(0, 50).replace(/\n/g, ' '));
 
-            // --- מנגנון ניקוי טקסט אוטומטי ---
-            const stopWords = ["להמשך קריאה", "להצטרפות", "לכל העדכונים", "כנסו", "לפרטים נוספים", "t.me", "chat.whatsapp.com", "לקבוצת הוואטסאפ", "לערוץ הטלגרם"];
-            let lines = rawText.split('\n');
-            let filteredLines = [];
-            
-            for (let line of lines) {
-                if (stopWords.some(word => line.includes(word))) {
-                    break; 
-                }
-                if (line.trim().length > 0) {
-                    filteredLines.push(line);
-                }
-            }
-
-            let title = filteredLines.length > 0 ? filteredLines[0] : '';
-            let content = filteredLines.length > 1 ? filteredLines.slice(1).join('\n') : '';
-
-            if (title.length > 80) {
-                content = title.substring(80) + (content ? '\n' + content : '');
-                title = title.substring(0, 80) + '...';
-            }
-            
-            if (!title && !content) {
-                console.log(">>> [סינון] ההודעה התרוקנה לגמרי אחרי הניקוי, מדלג.");
-                return;
-            }
-
+            // אורזים את ההודעה בדיוק כפי שהיא, בלי לחתוך ובלי לנקות פרסומות
             const newsItem = {
-                hash: generateHash(rawText + channelName + message.id),
-                title: title,
-                content: content,
+                hash: generateHash(rawText + sourceName + message.id),
+                title: sourceName, // נשים את שם השולח ככותרת כדי שתזהה מיד מי זה
+                content: rawText,
                 link: `https://t.me/c/${event.chatId?.toString().replace('-100', '')}/${message.id}`,
-                source: channelName,
+                source: sourceName,
                 imageUrl: null, 
                 time: new Date(message.date * 1000).toISOString()
             };
 
+            // דוחף לזיכרון השרת ומשדר לתוסף שלך ללא שום סינון!
             newsList.unshift(newsItem);
             if (newsList.length > MAX_NEWS) newsList.pop();
             
-            console.log(`>>> [הצלחה!] ההודעה מערוץ '${channelName}' משודרת כעת לתוסף בדפדפן.`);
             broadcast(newsItem); 
 
         }, new NewMessage({}));
@@ -192,7 +149,6 @@ async function startTelegramClient() {
         console.error("שגיאה בחיבור לטלגרם:", error);
     }
 }
-
 // ==========================================
 // חלק 3: סריקת אתרי RSS (Polling)
 // ==========================================
