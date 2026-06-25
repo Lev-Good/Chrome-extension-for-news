@@ -96,18 +96,21 @@ async function startTelegramClient() {
     try {
         await client.connect();
         console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת!");
+        // טעינת רשימת הערוצים לזיכרון כדי שהשרת יכיר את השמות שלהם!
+        await client.getDialogs({});
 
         // מאזין לכל הודעה חדשה שמגיעה לחשבון
-        client.addEventHandler(async (event) => {
+client.addEventHandler(async (event) => {
             const message = event.message;
-            if (event.isPrivate) return;
+            if (event.isPrivate || !message) return;
             
             const chat = await event.getChat();
             
-            // הדפסה חכמה שתתפוס כל דבר שאינו הודעה פרטית!
-            console.log(">>> [טלגרם סורק] התקבלה תנועה מצ'אט בשם:", chat?.title, "| סוג:", chat?.className);
+            // הדפסה מפורטת שכוללת גם את תוכן ההודעה
+            console.log(">>> [טלגרם] תוכן ההודעה:", message.message ? message.message.substring(0, 50) : "ללא טקסט");
+            console.log(">>> [טלגרם] מזהה:", event.chatId, "| שם שזוהה:", chat?.title, "| סוג:", chat?.className);
 
-            if (!chat || !chat.broadcast) return; 
+            if (!chat || !chat.broadcast) return;
 
             const channelName = chat.title || "ערוץ טלגרם";
             console.log(">>> [טלגרם] התקבלה הודעה! ערוץ:", channelName, "| טקסט:", cleanText.substring(0, 40));
