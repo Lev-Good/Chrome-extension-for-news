@@ -8,13 +8,15 @@ const crypto = require('crypto');
 const Parser = require('rss-parser');
 const cheerio = require('cheerio'); 
 
+// ספריות טלגרם החדשות
 const { Api, TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
-const { NewMessage } = require('telegram/events');
+const { NewMessage, Raw } = require('telegram/events'); // ייבוא של אירועי Raw לבדיקות גולמיות
 
 const app = express();
 app.use(cors());
 
+// הגדרת הדפדפן הפיקטיבי כדי לעקוף את חסימות ה-403 באתרי ה-RSS
 const parser = new Parser({ 
     timeout: 8000,
     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
@@ -24,6 +26,7 @@ let newsList = [];
 let clients = []; 
 const MAX_NEWS = 1000; 
 
+// --- הגדרות טלגרם של החשבון שלך ---
 const apiId = parseInt(process.env.TELEGRAM_API_ID) || 31830285; 
 const apiHash = process.env.TELEGRAM_API_HASH || "04f8ab5c37f4048bdadffa771c5a4ce4"; 
 const sessionString = process.env.TELEGRAM_SESSION || process.env.SESSION_STRING || "הכנס_כאן_את_המחרוזת_הארוכה_שקיבלת_מהסקריפט_login"; 
@@ -36,6 +39,10 @@ const rssChannels = [
     { name: "בחדרי חרדים (אתר)", url: "https://www.bhol.co.il/rss.xml" },
     { name: "ערוץ 14 (אתר)", url: "https://www.now14.co.il/feed/" }
 ];
+
+// ==========================================
+// חלק 1: API וצינור SSE 
+// ==========================================
 
 app.get('/', (req, res) => {
     res.json(newsList);
@@ -89,10 +96,12 @@ async function startTelegramClient() {
     try {
         await client.connect();
         await client.getMe(); // קריאה הכרחית לאימות סופי מול השרת
-        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת! (מצב צינור פתוח + מנוע אונליין)");
+        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת! (מצב צינור פתוח + מנוע אונליין + מאזין Raw)");
         
+        // טעינת עומק כדי לזהות כמה שיותר שמות של אנשים וקבוצות
+        await client.getDialogs({ limit: 500 });
+
         // --- פתרון הקסם: מנוע אל-כשל לסטטוס "מחובר" (Online Status) ---
-        // פקודה זו צועקת לטלגרם "המסך שלי דלוק ואני קורא!", והיא תרוץ כל דקה.
         await client.invoke(new Api.account.UpdateStatus({ offline: false }));
         console.log(">>> שרתי טלגרם קיבלו פקודת 'אני מחובר'. זרם הערוצים נפתח!");
         
@@ -100,7 +109,7 @@ async function startTelegramClient() {
             try {
                 // דיווח אונליין קבוע כדי שטלגרם לא ירדים לנו את הערוצים!
                 await client.invoke(new Api.account.UpdateStatus({ offline: false }));
-                // משיכת הודעות קלילה רק בשביל לרענן את הצינור הפנימי (socket)
+                // משיכת הודעות קלילה רק בשביל לרענן את הצינור הפנימי
                 await client.getDialogs({ limit: 15 });
             } catch (e) {
                 // מתעלמים משגיאות שקטות
@@ -108,6 +117,27 @@ async function startTelegramClient() {
         }, 60000); // הפעלה כל דקה בדיוק
         // -------------------------------------------------------------
 
+        // --- גלאי הרדאר הגולמי (Raw) לבקשת המתכנת ---
+        console.log(">>> מפעיל האזנת Raw גולמית לבקשת המתכנת...");
+        client.addEventHandler((update) => {
+            console.log("=== 🔍 RAW UPDATE ===");
+            console.log("סוג העדכון (className):", update.className);
+
+            // הדפסה מיוחדת למבזקים חיים מערוצים
+            if (update.className === 'UpdateNewChannelMessage') {
+                console.log(">> התקבל אובייקט הודעה גולמי מערוץ:", update.message?.peerId?.channelId?.toString());
+            }
+
+            // ה"אקדח המעשן" שהמתכנת מחפש!
+            if (update.className === 'UpdateChannelTooLong') {
+                console.log("🚨🚨 אזהרה קריטית: התקבל UpdateChannelTooLong!");
+                console.log(">> מזהה הערוץ שיצא מסנכרון:", update.channelId?.toString());
+                console.log(">> זה אומר ש-gramjs לא עושה getChannelDifference באופן אוטומטי!");
+            }
+        }, new Raw({}));
+        // -------------------------------------------------------------
+
+        // --- מאזין להודעות רגילות (במצב Firehose - הכל עובר) ---
         client.addEventHandler(async (event) => {
             const message = event.message;
             if (!message) return;
