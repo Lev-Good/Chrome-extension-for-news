@@ -16,6 +16,7 @@ const { NewMessage } = require('telegram/events');
 const app = express();
 app.use(cors());
 
+// הגדרת הדפדפן הפיקטיבי כדי לעקוף את חסימות ה-403 באתרי ה-RSS
 const parser = new Parser({ 
     timeout: 8000,
     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
@@ -30,7 +31,7 @@ const apiId = parseInt(process.env.TELEGRAM_API_ID) || 31830285; // ה-API ID ש
 const apiHash = process.env.TELEGRAM_API_HASH || "04f8ab5c37f4048bdadffa771c5a4ce4"; // ה-API HASH שלך
 const sessionString = process.env.TELEGRAM_SESSION || process.env.SESSION_STRING || "הכנס_כאן_את_המחרוזת_הארוכה_שקיבלת_מהסקריפט_login"; // המחרוזת מסקריפט ההתחברות או ממשתנה סביבה
 
-// רשימת ערוצי ה-RSS בלבד (את הטלגרם השרת שואב אוטומטית ממה שאתה מנוי אליו!)
+// רשימת ערוצי ה-RSS בלבד
 const rssChannels = [
     { name: "JDN (אתר)", url: "https://www.jdn.co.il/feed/" },
     { name: "ערוץ 7 (אתר)", url: "https://www.inn.co.il/Rss.aspx?Category=1" },
@@ -96,11 +97,11 @@ async function startTelegramClient() {
     try {
         await client.connect();
         console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת!");
+        
         // טעינת רשימת הערוצים לזיכרון כדי שהשרת יכיר את השמות שלהם!
         await client.getDialogs({});
 
-        // מאזין לכל הודעה חדשה שמגיעה לחשבון
-client.addEventHandler(async (event) => {
+        client.addEventHandler(async (event) => {
             const message = event.message;
             
             // מתעלם מהודעות פרטיות או הודעות חסרות טקסט
@@ -120,29 +121,44 @@ client.addEventHandler(async (event) => {
             }
             
             const channelName = chat?.title || "ערוץ לא ידוע";
-            const isBroadcast = chat?.broadcast === true;
             
             console.log(">>> [טלגרם] תוכן:", message.message.substring(0, 50));
-            console.log(">>> [טלגרם] מזהה:", event.chatId?.toString(), "| שם שזוהה:", channelName, "| האם ערוץ שידור:", isBroadcast);
+            console.log(">>> [טלגרם] מזהה:", event.chatId?.toString(), "| שם שזוהה:", channelName);
 
-            // אם זה לא ערוץ ציבורי (למשל קבוצה), או שהזיהוי נכשל לחלוטין - נזרוק את ההודעה בשרת
-            if (!chat || !isBroadcast) {
-                 console.log(">>> [סינון] ההודעה נזרקה בשרת! (היא אינה ערוץ שידור או שיש שגיאת זיהוי)");
+            // אם לא הצלחנו למצוא את שם הערוץ - נזרוק את ההודעה
+            if (!chat || !chat.title) {
+                 console.log(">>> [סינון] ההודעה נזרקה בשרת! (לא זוהה שם צ'אט)");
                  return; 
             }
 
             let cleanText = message.message || "";
-            if (!cleanText.trim()) return; // התעלמות מהודעות שהן רק תמונה ללא טקסט
 
-            // חלוקה לכותרת ותוכן
-            let lines = cleanText.split('\n').filter(l => l.trim().length > 0);
-            let title = lines.length > 0 ? lines[0] : '';
-            let content = lines.length > 1 ? lines.slice(1).join('\n') : '';
+            // --- מנגנון ניקוי טקסט אוטומטי (מנקה פרסומות, קישורים וזבל) ---
+            const stopWords = ["להמשך קריאה", "להצטרפות", "לכל העדכונים", "כנסו", "לפרטים נוספים", "t.me", "chat.whatsapp.com", "לקבוצת הוואטסאפ", "לערוץ הטלגרם"];
+            let lines = cleanText.split('\n');
+            let filteredLines = [];
+            
+            for (let line of lines) {
+                // בדיקה האם השורה מכילה מילת עצירה
+                if (stopWords.some(word => line.includes(word))) {
+                    break; // עוצר את קריאת ההודעה לחלוטין ברגע שמגיע החלק הפרסומי
+                }
+                if (line.trim().length > 0) {
+                    filteredLines.push(line);
+                }
+            }
 
+            let title = filteredLines.length > 0 ? filteredLines[0] : '';
+            let content = filteredLines.length > 1 ? filteredLines.slice(1).join('\n') : '';
+
+            // חיתוך כותרת ארוכה מדי
             if (title.length > 80) {
                 content = title.substring(80) + (content ? '\n' + content : '');
                 title = title.substring(0, 80) + '...';
             }
+            
+            // מניעת שידור הודעות ריקות לגמרי לאחר הניקוי
+            if (!title && !content) return;
 
             const newsItem = {
                 hash: generateHash(cleanText + channelName + message.id),
