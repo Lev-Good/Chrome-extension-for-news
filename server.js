@@ -16,7 +16,10 @@ const { NewMessage } = require('telegram/events');
 const app = express();
 app.use(cors());
 
-const parser = new Parser({ timeout: 8000 });
+const parser = new Parser({ 
+    timeout: 8000,
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+});
 
 let newsList = []; 
 let clients = []; 
@@ -186,10 +189,9 @@ async function fetchRSSData(channel) {
 }
 
 async function fetchAllRSS() {
-    for (let i = 0; i < rssChannels.length; i++) {
-        await fetchRSSData(rssChannels[i]);
-        await new Promise(resolve => setTimeout(resolve, 500));
-    }
+    // הרצת כל הסריקות במקביל כדי שחסימה באתר אחד לא תעצור את האחרים
+    Promise.allSettled(rssChannels.map(channel => fetchRSSData(channel)))
+        .catch(err => console.error("שגיאה כללית בריצת ה-RSS:", err.message));
 }
 
 // הפעלת סריקת RSS כל דקה
