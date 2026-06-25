@@ -27,11 +27,10 @@ let clients = [];
 const MAX_NEWS = 1000; 
 
 // --- הגדרות טלגרם של החשבון שלך ---
-const apiId = parseInt(process.env.TELEGRAM_API_ID) || 31830285; // ה-API ID שלך
-const apiHash = process.env.TELEGRAM_API_HASH || "04f8ab5c37f4048bdadffa771c5a4ce4"; // ה-API HASH שלך
-const sessionString = process.env.TELEGRAM_SESSION || process.env.SESSION_STRING || "הכנס_כאן_את_המחרוזת_הארוכה_שקיבלת_מהסקריפט_login"; // המחרוזת מסקריפט ההתחברות או ממשתנה סביבה
+const apiId = parseInt(process.env.TELEGRAM_API_ID) || 31830285; 
+const apiHash = process.env.TELEGRAM_API_HASH || "04f8ab5c37f4048bdadffa771c5a4ce4"; 
+const sessionString = process.env.TELEGRAM_SESSION || process.env.SESSION_STRING || "הכנס_כאן_את_המחרוזת_הארוכה_שקיבלת_מהסקריפט_login"; 
 
-// רשימת ערוצי ה-RSS בלבד
 const rssChannels = [
     { name: "JDN (אתר)", url: "https://www.jdn.co.il/feed/" },
     { name: "ערוץ 7 (אתר)", url: "https://www.inn.co.il/Rss.aspx?Category=1" },
@@ -96,10 +95,27 @@ async function startTelegramClient() {
 
     try {
         await client.connect();
-        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת! (מצב צינור פתוח)");
+        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת! (מצב צינור פתוח + מנוע נגד הירדמות)");
         
-        // טעינת עומק כדי לזהות כמה שיותר שמות של אנשים וקבוצות
-        await client.getDialogs({ limit: 500 });
+        console.log(">>> שואב ערוצים כדי למפות את החשבון...");
+        const dialogs = await client.getDialogs({ limit: 500 });
+        
+        // --- מנוע הזרקת עניין (Show Interest) כדי למנוע ניתוק ערוצים גדולים ---
+        const bigChannels = dialogs.filter(d => d.isChannel && d.entity);
+        console.log(`>>> נמצאו ${bigChannels.length} ערוצים וקבוצות. מפעיל פעימות דופק כל 3 דקות...`);
+
+        setInterval(async () => {
+            for (let i = 0; i < bigChannels.length; i++) {
+                try {
+                    // מושכים בכוח הודעה אחת מהערוץ רק כדי לסמן לשרתי טלגרם שאנחנו קוראים בו עכשיו
+                    await client.getMessages(bigChannels[i].entity, { limit: 1 });
+                    await new Promise(r => setTimeout(r, 400)); // שהייה קצרה למניעת עומס וחסימת ספאם
+                } catch (e) {
+                    // מתעלמים משגיאות שקטות
+                }
+            }
+        }, 180000); // הפעלה כל 3 דקות
+        // ------------------------------------------------------------------------
 
         client.addEventHandler(async (event) => {
             const message = event.message;
@@ -115,10 +131,9 @@ async function startTelegramClient() {
                 console.log(">>> [שגיאה] זיהוי ערוץ נכשל:", event.chatId?.toString());
             }
 
-            // לוקח את השם בכל מחיר: שם ערוץ, שם של קבוצה, או שם פרטי של איש קשר
+            // לוקחים כל הודעה מכל מקור ללא שום סינון
             const sourceName = chat?.title || chat?.firstName || chat?.username || "מקור לא ידוע";
             
-            // שולף טקסט, או שם הודעה חלופית אם זו תמונה/סטיקר ללא טקסט
             let rawText = message.text || message.message || "";
             if (!rawText.trim()) {
                 rawText = "[הודעה ללא טקסט - תמונה/וידאו/סטיקר]";
@@ -126,10 +141,9 @@ async function startTelegramClient() {
 
             console.log(">>> [טלגרם פתוח] התקבל מ:", sourceName, "| טקסט:", rawText.substring(0, 50).replace(/\n/g, ' '));
 
-            // אורזים את ההודעה בדיוק כפי שהיא, בלי לחתוך ובלי לנקות פרסומות
             const newsItem = {
                 hash: generateHash(rawText + sourceName + message.id),
-                title: sourceName, // נשים את שם השולח ככותרת כדי שתזהה מיד מי זה
+                title: sourceName, 
                 content: rawText,
                 link: `https://t.me/c/${event.chatId?.toString().replace('-100', '')}/${message.id}`,
                 source: sourceName,
@@ -137,7 +151,6 @@ async function startTelegramClient() {
                 time: new Date(message.date * 1000).toISOString()
             };
 
-            // דוחף לזיכרון השרת ומשדר לתוסף שלך ללא שום סינון!
             newsList.unshift(newsItem);
             if (newsList.length > MAX_NEWS) newsList.pop();
             
@@ -149,6 +162,7 @@ async function startTelegramClient() {
         console.error("שגיאה בחיבור לטלגרם:", error);
     }
 }
+
 // ==========================================
 // חלק 3: סריקת אתרי RSS (Polling)
 // ==========================================
@@ -196,16 +210,13 @@ async function fetchRSSData(channel) {
 }
 
 async function fetchAllRSS() {
-    // הרצת כל הסריקות במקביל כדי שחסימה באתר אחד לא תעצור את האחרים
     Promise.allSettled(rssChannels.map(channel => fetchRSSData(channel)))
         .catch(err => console.error("שגיאה כללית בריצת ה-RSS:", err.message));
 }
 
-// הפעלת סריקת RSS כל דקה
 setInterval(fetchAllRSS, 60 * 1000);
 fetchAllRSS();
 
-// הפעלת מאזין הטלגרם
 startTelegramClient();
 
 const PORT = process.env.PORT || 3000;
