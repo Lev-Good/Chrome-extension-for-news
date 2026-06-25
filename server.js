@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const Parser = require('rss-parser');
 const cheerio = require('cheerio'); 
 
-// ספריות טלגרם החדשות
 const { Api, TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { NewMessage } = require('telegram/events');
@@ -16,7 +15,6 @@ const { NewMessage } = require('telegram/events');
 const app = express();
 app.use(cors());
 
-// הגדרת הדפדפן הפיקטיבי כדי לעקוף את חסימות ה-403 באתרי ה-RSS
 const parser = new Parser({ 
     timeout: 8000,
     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
@@ -26,7 +24,6 @@ let newsList = [];
 let clients = []; 
 const MAX_NEWS = 1000; 
 
-// --- הגדרות טלגרם של החשבון שלך ---
 const apiId = parseInt(process.env.TELEGRAM_API_ID) || 31830285; 
 const apiHash = process.env.TELEGRAM_API_HASH || "04f8ab5c37f4048bdadffa771c5a4ce4"; 
 const sessionString = process.env.TELEGRAM_SESSION || process.env.SESSION_STRING || "הכנס_כאן_את_המחרוזת_הארוכה_שקיבלת_מהסקריפט_login"; 
@@ -39,10 +36,6 @@ const rssChannels = [
     { name: "בחדרי חרדים (אתר)", url: "https://www.bhol.co.il/rss.xml" },
     { name: "ערוץ 14 (אתר)", url: "https://www.now14.co.il/feed/" }
 ];
-
-// ==========================================
-// חלק 1: API וצינור SSE 
-// ==========================================
 
 app.get('/', (req, res) => {
     res.json(newsList);
@@ -95,27 +88,25 @@ async function startTelegramClient() {
 
     try {
         await client.connect();
-        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת! (מצב צינור פתוח + מנוע נגד הירדמות)");
+        await client.getMe(); // קריאה הכרחית לאימות סופי מול השרת
+        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת! (מצב צינור פתוח + מנוע אונליין)");
         
-        console.log(">>> שואב ערוצים כדי למפות את החשבון...");
-        const dialogs = await client.getDialogs({ limit: 500 });
+        // --- פתרון הקסם: מנוע אל-כשל לסטטוס "מחובר" (Online Status) ---
+        // פקודה זו צועקת לטלגרם "המסך שלי דלוק ואני קורא!", והיא תרוץ כל דקה.
+        await client.invoke(new Api.account.UpdateStatus({ offline: false }));
+        console.log(">>> שרתי טלגרם קיבלו פקודת 'אני מחובר'. זרם הערוצים נפתח!");
         
-        // --- מנוע הזרקת עניין (Show Interest) כדי למנוע ניתוק ערוצים גדולים ---
-        const bigChannels = dialogs.filter(d => d.isChannel && d.entity);
-        console.log(`>>> נמצאו ${bigChannels.length} ערוצים וקבוצות. מפעיל פעימות דופק כל 3 דקות...`);
-
         setInterval(async () => {
-            for (let i = 0; i < bigChannels.length; i++) {
-                try {
-                    // מושכים בכוח הודעה אחת מהערוץ רק כדי לסמן לשרתי טלגרם שאנחנו קוראים בו עכשיו
-                    await client.getMessages(bigChannels[i].entity, { limit: 1 });
-                    await new Promise(r => setTimeout(r, 400)); // שהייה קצרה למניעת עומס וחסימת ספאם
-                } catch (e) {
-                    // מתעלמים משגיאות שקטות
-                }
+            try {
+                // דיווח אונליין קבוע כדי שטלגרם לא ירדים לנו את הערוצים!
+                await client.invoke(new Api.account.UpdateStatus({ offline: false }));
+                // משיכת הודעות קלילה רק בשביל לרענן את הצינור הפנימי (socket)
+                await client.getDialogs({ limit: 15 });
+            } catch (e) {
+                // מתעלמים משגיאות שקטות
             }
-        }, 180000); // הפעלה כל 3 דקות
-        // ------------------------------------------------------------------------
+        }, 60000); // הפעלה כל דקה בדיוק
+        // -------------------------------------------------------------
 
         client.addEventHandler(async (event) => {
             const message = event.message;
@@ -131,7 +122,6 @@ async function startTelegramClient() {
                 console.log(">>> [שגיאה] זיהוי ערוץ נכשל:", event.chatId?.toString());
             }
 
-            // לוקחים כל הודעה מכל מקור ללא שום סינון
             const sourceName = chat?.title || chat?.firstName || chat?.username || "מקור לא ידוע";
             
             let rawText = message.text || message.message || "";
@@ -205,13 +195,13 @@ async function fetchRSSData(channel) {
         newsList.sort((a, b) => new Date(b.time) - new Date(a.time));
 
     } catch (error) {
-        console.error(`שגיאה בסריקת RSS מ- ${channel.name}:`, error.message);
+        // מציג רק את השם ואת קוד השגיאה במקום ערימת לוגים כדי לא להציף את המסוף
+        console.error(`[RSS] שגיאה מ-${channel.name}: ${error.message}`);
     }
 }
 
 async function fetchAllRSS() {
-    Promise.allSettled(rssChannels.map(channel => fetchRSSData(channel)))
-        .catch(err => console.error("שגיאה כללית בריצת ה-RSS:", err.message));
+    Promise.allSettled(rssChannels.map(channel => fetchRSSData(channel)));
 }
 
 setInterval(fetchAllRSS, 60 * 1000);
