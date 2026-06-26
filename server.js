@@ -109,31 +109,22 @@ async function startTelegramClient() {
         }, 60000);
 
         // --- הצינור הראשי העוקף דרך האזנת RAW ---
+// --- הצינור הראשי העוקף דרך האזנת RAW (גרסה מורחבת) ---
         client.addEventHandler(async (update) => {
             
-            // 1. מערכת החייאה אוטומטית לערוצים עמוסים (UpdateChannelTooLong)
-            if (update.className === 'UpdateChannelTooLong') {
-                const brokenChannelId = update.channelId?.toString();
-                console.log(`🚨 ערוץ מזהה ${brokenChannelId} יצא מסנכרון. השרת מבצע שאיבת איפוס...`);
-                try {
-                    // משיכת הודעה אחת בכוח מאפסת את ה-pts של הערוץ בספרייה ומחזירה אותו לעבודה!
-                    await client.getMessages("-100" + brokenChannelId, { limit: 1 });
-                    console.log(`✅ ערוץ ${brokenChannelId} אופס וחזר לשדר!`);
-                } catch (e) {
-                    // התעלמות משגיאות במקרה של חסימה
-                }
-                return;
-            }
+            // תופסים גם ערוצים (Channel) וגם קבוצות/שיחות (NewMessage)
+            const isChannelUpdate = update.className === 'UpdateNewChannelMessage';
+            const isStandardMessage = update.className === 'UpdateNewMessage';
 
-            // 2. תפיסת ההודעות - עכשיו תופסים גם ערוכות, גם חדשות, וגם קבוצות רגילות!
-            if (update.className === 'UpdateNewChannelMessage' || 
-                update.className === 'UpdateEditChannelMessage' || 
-                update.className === 'UpdateNewMessage') {
-                
+            if (isChannelUpdate || isStandardMessage) {
                 const message = update.message;
                 if (!message) return;
 
-                // איתור המזהה של הצ'אט/ערוץ ללא תלות בסוג האובייקט
+                // חילוץ טקסט
+                let rawText = message.message || message.text || "";
+                if (!rawText.trim()) rawText = "[מדיה]";
+
+                // זיהוי המקור
                 let channelId = null;
                 if (message.peerId) {
                     channelId = message.peerId.channelId || message.peerId.chatId || message.peerId.userId;
@@ -142,57 +133,24 @@ async function startTelegramClient() {
                 
                 channelId = channelId.toString();
 
-                let rawText = message.message || message.text || "";
-                if (!rawText.trim()) {
-                    rawText = "[מדיה - תמונה/סרטון/סטיקר]";
-                }
+                // הדפסה ללוג כדי שנראה את המקור
+                console.log(`\n🚀 [תפסנו הודעה!] סוג: ${update.className} | מזהה מקור: ${channelId}`);
 
-                // הדפסה ללוג
-                const isEdited = update.className === 'UpdateEditChannelMessage' ? "[ערוך]" : "";
-                console.log(`\n🚀 [מעקף גולמי ${isEdited}] מזהה מקור: ${channelId}`);
-
-                let channelName = "ערוץ טלגרם (" + channelId + ")";
+                let channelName = "מקור (" + channelId + ")";
                 try {
-                    // מנסה לזהות בתור ערוץ (עם קידומת -100) ואם נכשל מנסה כמשתמש/קבוצה רגילה
-                    let entity = null;
-                    try { entity = await client.getEntity("-100" + channelId); } 
-                    catch(e) { entity = await client.getEntity(channelId); }
-                    
+                    let entity = await client.getEntity(message.peerId);
                     if (entity && (entity.title || entity.firstName)) {
                         channelName = entity.title || entity.firstName;
                     }
                 } catch (e) {}
 
-                console.log(`>>> מקור: ${channelName} | טקסט: ${rawText.substring(0, 50).replace(/\n/g, ' ')}`);
+                console.log(`>>> שם: ${channelName} | טקסט: ${rawText.substring(0, 50).replace(/\n/g, ' ')}`);
 
-                // מנגנון ניקוי טקסט אוטומטי
-                const stopWords = ["להמשך קריאה", "להצטרפות", "לכל העדכונים", "כנסו", "לפרטים נוספים", "t.me", "chat.whatsapp.com", "לקבוצת הוואטסאפ", "לערוץ הטלגרם"];
-                let lines = rawText.split('\n');
-                let filteredLines = [];
-                
-                for (let line of lines) {
-                    if (stopWords.some(word => line.includes(word))) {
-                        break; 
-                    }
-                    if (line.trim().length > 0) {
-                        filteredLines.push(line);
-                    }
-                }
-
-                let title = filteredLines.length > 0 ? filteredLines[0] : '';
-                let content = filteredLines.length > 1 ? filteredLines.slice(1).join('\n') : '';
-
-                if (title.length > 80) {
-                    content = title.substring(80) + (content ? '\n' + content : '');
-                    title = title.substring(0, 80) + '...';
-                }
-                
-                if (!title && !content) return;
-
+                // שידור לתוסף
                 const newsItem = {
                     hash: generateHash(rawText + channelName + message.id),
-                    title: title, 
-                    content: content,
+                    title: channelName, 
+                    content: rawText,
                     link: `https://t.me/c/${channelId.replace('-100', '')}/${message.id}`,
                     source: channelName,
                     imageUrl: null, 
@@ -201,8 +159,12 @@ async function startTelegramClient() {
 
                 newsList.unshift(newsItem);
                 if (newsList.length > MAX_NEWS) newsList.pop();
-                
                 broadcast(newsItem); 
+            } else {
+                // לוג חשיפה: אם זו הודעה אבל לא מהסוגים שסיננו, נדפיס מה זה
+                if (update.message) {
+                    console.log(`🔍 [הודעה לא מזוהה] סוג: ${update.className}`);
+                }
             }
         }, new Raw({}));
 
