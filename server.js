@@ -46,13 +46,20 @@ function logLatency(source, stage, telegramTimestamp, extraInfo = '') {
     const entry = { time: new Date().toISOString(), source, stage, serverDelaySeconds: delay.toFixed(1), extraInfo };
     LATENCY_LOG.unshift(entry);
     if (LATENCY_LOG.length > 200) LATENCY_LOG.pop();
-    const icon = delay < 3 ? '🟢' : delay < 15 ? '🟡' : '🔴';
+    const icon = delay < 5 ? '🟢' : delay < 20 ? '🟡' : '🔴';
     console.log(`${icon} [${stage}] ${source} | עיכוב: ${delay.toFixed(1)}s${extraInfo ? ' | ' + extraInfo : ''}`);
 }
 
 app.get('/latency', (req, res) => res.json({
-    summary: { total: LATENCY_LOG.length, clients: clients.length,
-        globalState: { pts: globalPts, date: globalDate, qts: globalQts }
+    summary: {
+        total: LATENCY_LOG.length,
+        clients: clients.length,
+        polledChannels: [...channelRegistry.values()].map(c => ({
+            name: c.name,
+            method: c.method,
+            lastMsgId: c.lastMsgId,
+            lastPollAgo: c.lastPollTime ? Math.round((Date.now() - c.lastPollTime) / 1000) + 's' : 'never'
+        }))
     },
     log: LATENCY_LOG
 }));
@@ -88,22 +95,19 @@ function generateHash(text) {
 
 function broadcast(newsItem, telegramDate) {
     if (telegramDate && clients.length > 0) {
-        const d = ((Date.now() - telegramDate * 1000) / 1000).toFixed(1);
-        console.log(`📤 שידור ל-${clients.length} לקוחות | עיכוב כולל: ${d}s`);
+        console.log(`📤 שידור ל-${clients.length} לקוחות | עיכוב: ${((Date.now() - telegramDate * 1000) / 1000).toFixed(1)}s`);
     }
     clients.forEach(c => c.res.write(`data: ${JSON.stringify({ type: 'news', data: newsItem })}\n\n`));
 }
 
 // ==========================================
-// מצב גלובלי - לב הפתרון החדש
+// רישום ערוצים - מעקב לפי lastMsgId
 // ==========================================
 
-// pts/date/qts = "מיקום" גלובלי בתור העדכונים של טלגרם
-// updates.GetDifference מחזיר את כל מה שקרה מאז הנקודה הזו
-let globalPts = 0;
-let globalDate = 0;
-let globalQts = 0;
-let isDiffRunning = false;
+// method: 'push' = listener עובד בזמן אמת
+//         'poll' = צריך שאיבה אקטיבית סדרתית
+const channelRegistry = new Map();
+// { name, entity, method, lastMsgId, lastPollTime }
 
 const entityCache = new Map();
 
@@ -148,86 +152,84 @@ function addNewsItem(item, telegramDate) {
     return true;
 }
 
-function getChannelName(peerId) {
-    if (!peerId) return null;
-    const id = (peerId.channelId || peerId.chatId || peerId.userId)?.toString();
-    return id ? entityCache.get(id) || `מקור (${id})` : null;
-}
-
-function getPeerId(peerId) {
-    if (!peerId) return null;
-    return (peerId.channelId || peerId.chatId || peerId.userId)?.toString() || null;
-}
-
 // ==========================================
-// GetDifference - שאיבת כל הפערים בבקשה אחת
+// מנוע Polling סדרתי - ערוץ אחד בכל פעם
 // ==========================================
 
-async function fetchDifference(client) {
-    if (isDiffRunning || !globalPts) return;
-    isDiffRunning = true;
+let pollIndex = 0;
+let isPolling = false;
 
+// שאיבת ערוץ יחיד בלבד - min_id מונע כפילויות וFloodWait
+async function pollOneChannel(client) {
+    if (isPolling) return;
+
+    const pollChannels = [...channelRegistry.entries()]
+        .filter(([, c]) => c.method === 'poll' && c.entity);
+
+    if (pollChannels.length === 0) return;
+
+    // רוטציה: כל קריאה מטפלת בערוץ הבא בתור
+    pollIndex = pollIndex % pollChannels.length;
+    const [channelId, state] = pollChannels[pollIndex];
+    pollIndex++;
+
+    isPolling = true;
     try {
-        // בקשה אחת לכל הפערים - ללא לולאת ערוצים
-        const diff = await client.invoke(new Api.updates.GetDifference({
-            pts: globalPts,
-            date: globalDate,
-            qts: globalQts || 0,
-        }));
+        // min_id = קריטי! טלגרם מחזיר רק הודעות חדשות מה-id הזה ואילך
+        // בלי זה - שאיבת הכל מחדש בכל פעם = FloodWait
+        const msgs = await client.getMessages(state.entity, {
+            limit: 5,
+            min_id: state.lastMsgId || 0
+        });
 
-        if (diff.className === 'updates.DifferenceEmpty') {
-            // אין חדש - מעדכן רק את date
-            if (diff.date) globalDate = diff.date;
-            isDiffRunning = false;
+        if (!msgs || msgs.length === 0) {
+            state.lastPollTime = Date.now();
+            isPolling = false;
             return;
         }
 
-        const newMessages = diff.newMessages || [];
-        const otherUpdates = diff.otherUpdates || [];
-        let caught = 0;
+        // מיון מישן לחדש
+        const sorted = [...msgs].sort((a, b) => a.id - b.id);
+        let newCount = 0;
 
-        // עיבוד הודעות חדשות
-        for (const msg of newMessages) {
+        for (const msg of sorted) {
             if (!msg?.message) continue;
-            const channelId = getPeerId(msg.peerId);
-            const name = channelId ? (entityCache.get(channelId) || `מקור (${channelId})`) : 'לא ידוע';
-            logLatency(name, 'getDifference_catch', msg.date);
-            const item = buildNewsItem(msg, name, channelId);
-            if (addNewsItem(item, msg.date)) caught++;
+            if (msg.id <= (state.lastMsgId || 0)) continue;
+
+            // עדכון lastMsgId תמיד, גם אם ההודעה ישנה
+            if (msg.id > (state.lastMsgId || 0)) state.lastMsgId = msg.id;
+
+            // סינון הודעות ישנות מדי (מעל 5 דקות - הפולינג רץ מהר)
+            const age = Date.now() - msg.date * 1000;
+            if (age > 5 * 60 * 1000) continue;
+
+            logLatency(state.name, 'serial_poll', msg.date, `id: ${msg.id}`);
+            const item = buildNewsItem(msg, state.name, channelId);
+            if (addNewsItem(item, msg.date)) newCount++;
         }
 
-        // עדכון pts/date/qts מהתשובה
-        if (diff.state) {
-            globalPts = diff.state.pts;
-            globalDate = diff.state.date;
-            globalQts = diff.state.qts;
-        } else if (diff.intermediateState) {
-            // DifferenceTooLong - יש עוד, נמשיך
-            globalPts = diff.intermediateState.pts;
-            globalDate = diff.intermediateState.date;
-            globalQts = diff.intermediateState.qts;
-        }
-
-        if (caught > 0) console.log(`🔄 [GetDifference] נתפסו ${caught} הודעות חדשות`);
-
-        // אם הייתה תשובה חלקית - שאב שוב מיד
-        if (diff.className === 'updates.DifferenceTooLong' || diff.intermediateState) {
-            isDiffRunning = false;
-            setTimeout(() => fetchDifference(client), 500);
-            return;
-        }
+        state.lastPollTime = Date.now();
 
     } catch (e) {
-        // FLOOD_WAIT - לא עושים כלום, רק ממתינים
         if (e.message?.includes('FLOOD_WAIT')) {
-            const wait = parseInt(e.message.match(/\d+/)?.[0] || '30');
-            console.warn(`⏳ [GetDifference] FloodWait ${wait}s - ממתין`);
+            const wait = parseInt(e.message.match(/\d+/)?.[0] || '10');
+            console.warn(`⏳ FloodWait ${wait}s על ${state.name} - מדלג`);
+            // לא מחכים - פשוט מדלגים לערוץ הבא בפעם הבאה
+            state.method = 'poll_paused';
+            // חזרה אחרי המתנה
+            setTimeout(() => { state.method = 'poll'; }, (wait + 5) * 1000);
         } else {
-            console.warn(`[GetDifference] שגיאה: ${e.message}`);
+            console.warn(`[poll] ${state.name}: ${e.message}`);
         }
     }
 
-    isDiffRunning = false;
+    isPolling = false;
+}
+
+// הלולאה הראשית: ערוץ אחד כל 2 שניות = מחזור שלם על 33 ערוצים כל ~66 שניות
+// זה בטוח מFloodWait וגם מספיק מהיר
+function startSerialPolling(client) {
+    setInterval(() => pollOneChannel(client), 2000);
 }
 
 // ==========================================
@@ -252,55 +254,71 @@ async function startTelegramClient() {
         await client.getMe();
         console.log("✅ מחובר לטלגרם!");
 
-        // ── שלב 1: שאיבת State גלובלי ראשוני (pts/date/qts) ──
-        // updates.getState = בקשה אחת קלה, לא GetHistory
-        const state = await client.invoke(new Api.updates.GetState());
-        globalPts = state.pts;
-        globalDate = state.date;
-        globalQts = state.qts;
-        console.log(`✅ State גלובלי: pts=${globalPts}, date=${globalDate}, qts=${globalQts}`);
+        // ── טעינת דיאלוגים + lastMsgId ראשוני ──
+        console.log("⏳ טוען דיאלוגים...");
+        const dialogs = await client.getDialogs({ limit: 500 });
 
-        // ── שלב 2: טעינת שמות ערוצים בלבד (ללא GetHistory!) ──
-        console.log("⏳ טוען שמות ערוצים...");
-        // getDialogs ללא limit גבוה - רק לאכלוס entityCache
-        const dialogs = await client.getDialogs({ limit: 200 });
         for (const dialog of dialogs) {
             if (!dialog.entity) continue;
             const id = dialog.entity.id?.toString();
+            if (!id) continue;
             const name = dialog.entity.title || dialog.entity.firstName || `ערוץ ${id}`;
-            if (id) entityCache.set(id, name);
-        }
-        console.log(`✅ נטענו שמות ${entityCache.size} ערוצים`);
 
-        // ── שלב 3: GetDifference כל 30 שניות - בקשה אחת לכולם ──
-        // 30 שניות = עיכוב מקסימלי. בהרבה מקרים ה-listener יתפוס לפני.
-        setInterval(() => fetchDifference(client), 30 * 1000);
+            entityCache.set(id, name);
+
+            // topMessage = ה-id של ההודעה האחרונה בדיאלוג
+            // זה הנקודה שממנה נתחיל לשאוב — לא נשאב שום דבר ישן
+            const lastMsgId = dialog.dialog?.topMessage || 0;
+
+            channelRegistry.set(id, {
+                name,
+                entity: dialog.entity,
+                // מתחיל כ-push. הwatchdog יעביר ל-poll אם לא שמענו בזמן.
+                method: 'push',
+                lastMsgId,
+                lastPollTime: null
+            });
+        }
+
+        console.log(`✅ נטענו ${channelRegistry.size} ערוצים | topMessage אותחל לכולם`);
+
+        // ── Watchdog: ערוץ שקט > 90 שניות → poll ──
+        // 90 שניות = זמן סביר שאחריו ברור שה-push לא עובד לערוץ זה
+        setInterval(() => {
+            const now = Date.now();
+            let switched = 0;
+            for (const [, state] of channelRegistry.entries()) {
+                if (state.method === 'push') {
+                    // בדיקה: האם שמענו מהערוץ הזה דרך ה-listener לאחרונה?
+                    // נשתמש ב-lastPollTime כ"שמענו לאחרונה"
+                    const silent = !state.lastPollTime || (now - state.lastPollTime > 90 * 1000);
+                    if (silent) {
+                        state.method = 'poll';
+                        switched++;
+                    }
+                }
+            }
+            if (switched > 0) console.log(`🔀 Watchdog: ${switched} ערוצים → poll`);
+        }, 90 * 1000);
 
         // שמירה על חיות
         setInterval(async () => {
             try { await client.invoke(new Api.account.UpdateStatus({ offline: false })); } catch {}
         }, 30000);
 
-        // ── המאזין הראשי - push בזמן אמת ──
+        // הפעלת polling סדרתי
+        startSerialPolling(client);
+
+        // ── המאזין הראשי ──
         client.addEventHandler(async (update) => {
 
-            // עדכון State גלובלי מכל אירוע
-            if (update.pts) {
-                if (update.pts > globalPts) globalPts = update.pts;
-            }
-            if (update.date && update.date > globalDate) globalDate = update.date;
-
-            // UpdatesTooLong = טלגרם צועק "פספסת" → GetDifference מיידי
-            if (update.className === 'UpdatesTooLong') {
-                console.log('⚡ UpdatesTooLong - מפעיל GetDifference מיידי');
-                fetchDifference(client).catch(() => {});
-                return;
-            }
-
-            // UpdateChannelTooLong = אותו דבר לערוץ ספציפי
             if (update.className === 'UpdateChannelTooLong') {
-                console.log(`⚡ UpdateChannelTooLong - מפעיל GetDifference`);
-                fetchDifference(client).catch(() => {});
+                const chId = update.channelId?.toString();
+                const state = chId ? channelRegistry.get(chId) : null;
+                if (state) {
+                    state.method = 'poll';
+                    console.log(`⚡ TooLong → ${state.name} עובר ל-poll`);
+                }
                 return;
             }
 
@@ -313,12 +331,21 @@ async function startTelegramClient() {
             const message = update.message;
             if (!message) return;
 
-            const channelId = getPeerId(message.peerId);
+            const peerId = message.peerId;
+            const channelId = (peerId?.channelId || peerId?.chatId || peerId?.userId)?.toString();
             if (!channelId) return;
 
-            const isEdited = update.className.includes('Edit');
+            const state = channelRegistry.get(channelId);
             const channelName = entityCache.get(channelId) || `מקור (${channelId})`;
 
+            // ערוץ שה-listener מקבל ממנו → push, עדכון lastMsgId
+            if (state) {
+                state.method = 'push';
+                state.lastPollTime = Date.now(); // "שמענו עכשיו"
+                if (message.id > (state.lastMsgId || 0)) state.lastMsgId = message.id;
+            }
+
+            const isEdited = update.className.includes('Edit');
             logLatency(channelName, 'push_listener', message.date, update.className);
 
             const item = buildNewsItem(message, channelName, channelId, isEdited);
@@ -326,7 +353,7 @@ async function startTelegramClient() {
 
         }, new Raw({}));
 
-        console.log("✅ מאזין פעיל | GetDifference כל 30s");
+        console.log("✅ מאזין + polling סדרתי פעילים");
 
     } catch (error) {
         console.error("❌ שגיאה:", error.message);
