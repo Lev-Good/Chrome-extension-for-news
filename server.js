@@ -26,7 +26,7 @@ let newsList = [];
 let clients = []; 
 const MAX_NEWS = 1000; 
 
-// --- הגדרות טלגרם של החשבון שלך ---
+// --- הגדרות טלגרם של החשבון ---
 const apiId = parseInt(process.env.TELEGRAM_API_ID) || 31830285; 
 const apiHash = process.env.TELEGRAM_API_HASH || "04f8ab5c37f4048bdadffa771c5a4ce4"; 
 const sessionString = process.env.TELEGRAM_SESSION || process.env.SESSION_STRING || "הכנס_כאן_את_המחרוזת_הארוכה_שקיבלת_מהסקריפט_login"; 
@@ -64,6 +64,7 @@ app.get('/stream', (req, res) => {
     });
 });
 
+// פעימת חיים לשמירת חיבורי ה-SSE פתוחים
 setInterval(() => {
     clients.forEach(c => c.res.write(':\n\n'));
 }, 25000);
@@ -79,7 +80,7 @@ function broadcast(newsItem) {
 }
 
 // ==========================================
-// חלק 2: חיבור לטלגרם ומאזין ה-Raw המורחב
+// חלק 2: חיבור טלגרם עם מעקף Raw מתקדם
 // ==========================================
 
 async function startTelegramClient() {
@@ -96,9 +97,12 @@ async function startTelegramClient() {
     try {
         await client.connect();
         await client.getMe(); 
-        console.log("מחובר בהצלחה לשרתי טלגרם בזמן אמת! (רשת רחבה + מערכת החייאה)");
+        console.log("✅ מחובר בהצלחה לשרתי טלגרם בזמן אמת! (מעקף Raw + מנוע אונליין)");
         
+        // טעינת עומק לאכלוס הזיכרון המהיר
         await client.getDialogs({ limit: 500 });
+        
+        // פקודת שמירה על סטטוס אונליין למניעת "הירדמות" ערוצים גדולים
         await client.invoke(new Api.account.UpdateStatus({ offline: false }));
         
         setInterval(async () => {
@@ -108,23 +112,35 @@ async function startTelegramClient() {
             } catch (e) {}
         }, 60000);
 
-        // --- הצינור הראשי העוקף דרך האזנת RAW ---
-// --- הצינור הראשי העוקף דרך האזנת RAW (גרסה מורחבת) ---
+        // --- מאזין הרדאר הגולמי והראשי ---
         client.addEventHandler(async (update) => {
             
-            // תופסים גם ערוצים (Channel) וגם קבוצות/שיחות (NewMessage)
-            const isChannelUpdate = update.className === 'UpdateNewChannelMessage';
-            const isStandardMessage = update.className === 'UpdateNewMessage';
+            // 1. מערכת החייאה אוטומטית לערוצים עמוסים שיוצאים מסנכרון
+            if (update.className === 'UpdateChannelTooLong') {
+                const brokenChannelId = update.channelId?.toString();
+                console.log(`🚨 ערוץ מזהה ${brokenChannelId} יצא מסנכרון. מתבצעת שאיבת איפוס...`);
+                try {
+                    await client.getMessages("-100" + brokenChannelId, { limit: 1 });
+                    console.log(`✅ ערוץ ${brokenChannelId} אופס וחזר לשדר!`);
+                } catch (e) {
+                    // התעלמות שקטה מחסימות זמניות
+                }
+                return;
+            }
 
-            if (isChannelUpdate || isStandardMessage) {
+            // 2. תפיסת כל סוגי ההודעות: חדשות/ערוכות, קבוצות/ערוצים/פרטי
+            const validUpdateTypes = [
+                'UpdateNewChannelMessage',
+                'UpdateEditChannelMessage',
+                'UpdateNewMessage',
+                'UpdateEditMessage'
+            ];
+
+            if (validUpdateTypes.includes(update.className)) {
                 const message = update.message;
                 if (!message) return;
 
-                // חילוץ טקסט
-                let rawText = message.message || message.text || "";
-                if (!rawText.trim()) rawText = "[מדיה]";
-
-                // זיהוי המקור
+                // חילוץ המזהה (Peer ID) בצורה בטוחה מכל סוגי האובייקטים
                 let channelId = null;
                 if (message.peerId) {
                     channelId = message.peerId.channelId || message.peerId.chatId || message.peerId.userId;
@@ -133,38 +149,73 @@ async function startTelegramClient() {
                 
                 channelId = channelId.toString();
 
-                // הדפסה ללוג כדי שנראה את המקור
-                console.log(`\n🚀 [תפסנו הודעה!] סוג: ${update.className} | מזהה מקור: ${channelId}`);
+                // חילוץ טקסט חכם (כולל כיתוב למדיה)
+                let rawText = message.message || message.text || "";
+                if (!rawText.trim()) {
+                    rawText = "[מדיה - תמונה/סרטון/סטיקר]";
+                }
 
+                // בניית השם - מנסה קודם למשוך מהזיכרון כדי לא להעמיס על השרתים
                 let channelName = "מקור (" + channelId + ")";
                 try {
-                    let entity = await client.getEntity(message.peerId);
+                    let entity = await client.getEntity("-100" + channelId).catch(() => null);
+                    if (!entity) entity = await client.getEntity(channelId).catch(() => null);
+                    
                     if (entity && (entity.title || entity.firstName)) {
                         channelName = entity.title || entity.firstName;
                     }
                 } catch (e) {}
 
-                console.log(`>>> שם: ${channelName} | טקסט: ${rawText.substring(0, 50).replace(/\n/g, ' ')}`);
+                const isEdited = update.className.includes('Edit') ? "[ערוך]" : "";
+                console.log(`\n🚀 [תפיסה ${isEdited}] מקור: ${channelName} | טקסט: ${rawText.substring(0, 50).replace(/\n/g, ' ')}`);
 
-                // שידור לתוסף
+                // מנגנון ניקוי פרסומות ולינקים מיותרים
+                const stopWords = ["להמשך קריאה", "להצטרפות", "לכל העדכונים", "כנסו", "לפרטים נוספים", "t.me", "chat.whatsapp.com", "לקבוצת הוואטסאפ", "לערוץ הטלגרם"];
+                let lines = rawText.split('\n');
+                let filteredLines = [];
+                
+                for (let line of lines) {
+                    if (stopWords.some(word => line.includes(word))) {
+                        break; 
+                    }
+                    if (line.trim().length > 0) {
+                        filteredLines.push(line);
+                    }
+                }
+
+                let title = filteredLines.length > 0 ? filteredLines[0] : '';
+                let content = filteredLines.length > 1 ? filteredLines.slice(1).join('\n') : '';
+
+                // קיצור כותרת אם היא ארוכה מדי
+                if (title.length > 80) {
+                    content = title.substring(80) + (content ? '\n' + content : '');
+                    title = title.substring(0, 80) + '...';
+                }
+                
+                if (!title && !content) return;
+
                 const newsItem = {
                     hash: generateHash(rawText + channelName + message.id),
-                    title: channelName, 
-                    content: rawText,
+                    title: title, 
+                    content: content,
                     link: `https://t.me/c/${channelId.replace('-100', '')}/${message.id}`,
                     source: channelName,
                     imageUrl: null, 
                     time: new Date((message.date || Math.floor(Date.now() / 1000)) * 1000).toISOString()
                 };
 
-                newsList.unshift(newsItem);
-                if (newsList.length > MAX_NEWS) newsList.pop();
-                broadcast(newsItem); 
-            } else {
-                // לוג חשיפה: אם זו הודעה אבל לא מהסוגים שסיננו, נדפיס מה זה
-                if (update.message) {
-                    console.log(`🔍 [הודעה לא מזוהה] סוג: ${update.className}`);
+                // דחיפה לזיכרון השרת (ללא כפילויות)
+                const exists = newsList.find(n => n.hash === newsItem.hash);
+                if (!exists) {
+                    newsList.unshift(newsItem);
+                    if (newsList.length > MAX_NEWS) newsList.pop();
+                    
+                    // שידור בזמן אמת לתוסף
+                    broadcast(newsItem); 
                 }
+            } else if (update.message) {
+                // לוג מעקב למקרה שיש סוג הודעה נדיר שעדיין לא כיסינו
+                console.log(`🔍 [הודעה שלא סוננה] סוג האובייקט: ${update.className}`);
             }
         }, new Raw({}));
 
@@ -220,6 +271,7 @@ async function fetchRSSData(channel) {
 }
 
 async function fetchAllRSS() {
+    // הרצה במקביל למניעת עיכובים משגיאות 403
     Promise.allSettled(rssChannels.map(channel => fetchRSSData(channel)));
 }
 
